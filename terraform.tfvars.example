@@ -1,0 +1,17 @@
+# -----------------------------------------------------------------------------
+# Copy to terraform.tfvars (gitignored) before apply:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# Replace values with your own GCP project and region (documented in README as
+# <YOUR_PROJECT_ID> and <YOUR_REGION>). Example region below is safe to change.
+# -----------------------------------------------------------------------------
+
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+
+# Optional — defaults match cloudbuild.yaml / cloudbuild-bad-app.yaml _REPOSITORY
+# artifact_repository_id = "secure-supply-chain-repo"
+# gke_cluster_name       = "demo-cluster"
+# vpc_name               = "demo-gke-vpc"
+# subnet_name            = "demo-gke-subnet"
+# grant_cloud_build_iam  = true

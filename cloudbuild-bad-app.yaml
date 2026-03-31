@@ -1,0 +1,152 @@
+# Same pipeline as cloudbuild.yaml but targets bad-app (vulnerable deps / CRITICAL scan gate).
+# Submit: gcloud builds submit --config=cloudbuild-bad-app.yaml --project=$PROJECT_ID .
+# Expect: build + push succeed; scan_and_gate fails; attest step does not run.
+#
+# CONFIGURE: See header comments in cloudbuild.yaml (_AR_LOCATION, _REPOSITORY, KMS, attestor).
+
+substitutions:
+  _AR_LOCATION: us-central1
+  _REPOSITORY: secure-supply-chain-repo
+  _IMAGE_NAME: bad-app
+  _SCAN_LOCATION: us
+  _KMS_LOCATION: us-central1
+  _KEYRING: binauthz-keyring
+  _CRYPTO_KEY: binauthz-signing-key
+  _KEY_VERSION: "1"
+  _ATTESTOR: demo-attestor
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - -t
+      - ${_AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}
+      - -f
+      - bad-app/Dockerfile
+      - bad-app
+    env:
+      - DOCKER_BUILDKIT=1
+
+  - name: gcr.io/cloud-builders/docker
+    id: push
+    args:
+      - push
+      - ${_AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: scan_and_gate
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        IMAGE_URI="${_AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}"
+        echo "Running on-demand scan for: $${IMAGE_URI}"
+
+        gcloud artifacts docker images scan "$${IMAGE_URI}" \
+          --remote \
+          --location="${_SCAN_LOCATION}" \
+          --quiet \
+          --format=json > /workspace/scan-result.json
+
+        python3 << 'PY'
+        import json
+        import subprocess
+        import sys
+
+        with open("/workspace/scan-result.json", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        def find_scan_name(obj):
+            if isinstance(obj, dict):
+                resp = obj.get("response")
+                if isinstance(resp, dict):
+                    scan = resp.get("scan")
+                    if isinstance(scan, str) and "/scans/" in scan:
+                        return scan
+                name = obj.get("name")
+                if isinstance(name, str) and "/scans/" in name:
+                    return name
+                for v in obj.values():
+                    hit = find_scan_name(v)
+                    if hit:
+                        return hit
+            elif isinstance(obj, list):
+                for item in obj:
+                    hit = find_scan_name(item)
+                    if hit:
+                        return hit
+            return None
+
+        scan_name = find_scan_name(payload)
+        if not scan_name:
+            print("Could not resolve scan resource name from gcloud output; failing closed.")
+            print(json.dumps(payload, indent=2)[:4000])
+            sys.exit(1)
+
+        print("Scan resource:", scan_name)
+
+        raw = subprocess.check_output(
+            [
+                "gcloud",
+                "artifacts",
+                "docker",
+                "images",
+                "list-vulnerabilities",
+                scan_name,
+                "--location=" + "${_SCAN_LOCATION}",
+                "--format=json",
+            ],
+            text=True,
+        )
+        parsed = json.loads(raw) if raw.strip() else []
+        if isinstance(parsed, dict):
+            occurrences = parsed.get("occurrences") or parsed.get("vulnerabilities") or []
+        else:
+            occurrences = parsed
+
+        critical = 0
+        for occ in occurrences:
+            vuln = occ.get("vulnerability") or {}
+            sev = vuln.get("effectiveSeverity") or occ.get("effectiveSeverity")
+            if sev == "CRITICAL":
+                critical += 1
+                print("CRITICAL:", vuln.get("cvssScore"), vuln.get("shortDescription", "")[:120])
+
+        if critical:
+            print(f"Policy gate: {critical} CRITICAL finding(s) — stopping before attestation.")
+            sys.exit(1)
+
+        print("Policy gate: no CRITICAL findings; proceeding to attestation.")
+        PY
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    id: attest
+    entrypoint: bash
+    args:
+      - -ceu
+      - |
+        IMAGE_URI="${_AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}"
+        DIGEST="$$(gcloud artifacts docker images describe "$${IMAGE_URI}" --format='value(image_summary.digest)')"
+        if [[ -z "$${DIGEST}" ]]; then
+          echo "Failed to read image digest for $${IMAGE_URI}"
+          exit 1
+        fi
+        ARTIFACT_URL="${_AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}@$${DIGEST}"
+        echo "Creating attestation for $${ARTIFACT_URL}"
+
+        gcloud beta container binauthz attestations sign-and-create \
+          --project="${PROJECT_ID}" \
+          --artifact-url="$${ARTIFACT_URL}" \
+          --attestor="projects/${PROJECT_ID}/attestors/${_ATTESTOR}" \
+          --keyversion-project="${PROJECT_ID}" \
+          --keyversion-location="${_KMS_LOCATION}" \
+          --keyversion-keyring="${_KEYRING}" \
+          --keyversion-key="${_CRYPTO_KEY}" \
+          --keyversion="${_KEY_VERSION}"
+
+images:
+  - ${_AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${BUILD_ID}

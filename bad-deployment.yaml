@@ -1,0 +1,40 @@
+# Demo: deploy intentionally unsigned "bad-app" to GKE Autopilot (demo-cluster).
+# With Binary Authorization policy enforcing attestations, admission should block this workload.
+#
+# Demo prep — replace placeholders after pushing bad-app to Artifact Registry:
+#   REGION     = <YOUR_REGION> (must match Terraform `region`)
+#   PROJECT    = <YOUR_PROJECT_ID>
+#   REPO       = secure-supply-chain-repo (or your artifact_repository_id)
+#   IMAGE      = bad-app
+#   TAG        = your tag or digest
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bad-app
+  labels:
+    app: bad-app
+    demo: trusted-supply-chain
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bad-app
+  template:
+    metadata:
+      labels:
+        app: bad-app
+    spec:
+      containers:
+        - name: bad-app
+          # PASTE_ARTIFACT_REGISTRY_IMAGE_HERE (full image:tag or image@sha256:...)
+          # Example: <YOUR_REGION>-docker.pkg.dev/<YOUR_PROJECT_ID>/<REPO>/bad-app:TAG
+          image: REPLACE_ME_REGION-docker.pkg.dev/REPLACE_ME_PROJECT/secure-supply-chain-repo/bad-app:REPLACE_ME_TAG
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
